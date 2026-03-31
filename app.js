@@ -1,5 +1,3 @@
-const STORE_KEY = "npu_occupancy_data_v1";
-
 const machineForm = document.getElementById("machine-form");
 const machineList = document.getElementById("machine-list");
 const machineSelect = document.getElementById("machine-select");
@@ -18,9 +16,11 @@ const switchUserBtn = document.getElementById("switch-user-btn");
 const userModal = document.getElementById("user-modal");
 const userForm = document.getElementById("user-form");
 const userNameInput = document.getElementById("user-name-input");
+const backendStatusLabel = document.getElementById("backend-status-label");
 
-let state = loadState();
+let state = { machines: [], bookings: [] };
 let currentUser = "";
+let sb = null;
 const tooltipEl = createTooltip();
 let hideTooltipTimer = null;
 
@@ -30,16 +30,6 @@ function todayISO() {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
-}
-
-function loadState() {
-  const raw = localStorage.getItem(STORE_KEY);
-  if (raw) return JSON.parse(raw);
-  return { machines: [], bookings: [] };
-}
-
-function saveState() {
-  localStorage.setItem(STORE_KEY, JSON.stringify(state));
 }
 
 function saveCurrentUser(name) {
@@ -57,6 +47,45 @@ function uid(prefix) {
 
 function toHH(hour) {
   return `${String(hour).padStart(2, "0")}:00`;
+}
+
+function initSupabase() {
+  const cfg = window.NPU_APP_CONFIG || {};
+  if (!cfg.supabaseUrl || !cfg.supabaseAnonKey) {
+    backendStatusLabel.textContent = "后端状态：未配置 Supabase（请填 config.js）";
+    return false;
+  }
+  sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
+  backendStatusLabel.textContent = "后端状态：Supabase 已连接";
+  return true;
+}
+
+async function refreshStateFromCloud() {
+  const [{ data: machines, error: mErr }, { data: bookings, error: bErr }] = await Promise.all([
+    sb.from("machines").select("*").order("created_at", { ascending: true }),
+    sb.from("bookings").select("*").order("created_at", { ascending: true })
+  ]);
+  if (mErr || bErr) {
+    throw new Error(`加载失败: ${mErr?.message || ""} ${bErr?.message || ""}`.trim());
+  }
+
+  state.machines = (machines || []).map((m) => ({
+    id: m.id,
+    name: m.name,
+    model: m.model,
+    location: m.location,
+    remark: m.remark || ""
+  }));
+
+  state.bookings = (bookings || []).map((b) => ({
+    id: b.id,
+    machineId: b.machine_id,
+    date: b.date,
+    startHour: b.start_hour,
+    endHour: b.end_hour,
+    userName: b.user_name,
+    purpose: b.purpose
+  }));
 }
 
 function initHourOptions() {
@@ -249,40 +278,56 @@ function attachTooltip(targetEl, hit, hour) {
   });
 }
 
-function cancelSingleHourBooking(bookingId, cancelHour) {
+async function cancelSingleHourBooking(bookingId, cancelHour) {
   const target = state.bookings.find((b) => b.id === bookingId);
   if (!target) return;
   const canCancel = target.userName === currentUser || isAdminUser();
   if (!canCancel) return;
   if (!(cancelHour >= target.startHour && cancelHour < target.endHour)) return;
 
-  state.bookings = state.bookings.filter((b) => b.id !== bookingId);
-
-  // 单小时粒度取消：拆分原区间，移除 cancelHour 这个小时
+  const inserts = [];
   if (target.startHour < cancelHour) {
-    state.bookings.push({
-      ...target,
+    inserts.push({
       id: uid("booking"),
-      startHour: target.startHour,
-      endHour: cancelHour
+      machine_id: target.machineId,
+      date: target.date,
+      start_hour: target.startHour,
+      end_hour: cancelHour,
+      user_name: target.userName,
+      purpose: target.purpose
     });
   }
   if (cancelHour + 1 < target.endHour) {
-    state.bookings.push({
-      ...target,
+    inserts.push({
       id: uid("booking"),
-      startHour: cancelHour + 1,
-      endHour: target.endHour
+      machine_id: target.machineId,
+      date: target.date,
+      start_hour: cancelHour + 1,
+      end_hour: target.endHour,
+      user_name: target.userName,
+      purpose: target.purpose
     });
   }
 
-  saveState();
+  const { error: delErr } = await sb.from("bookings").delete().eq("id", bookingId);
+  if (delErr) {
+    bookingHint.textContent = `取消失败：${delErr.message}`;
+    return;
+  }
+  if (inserts.length > 0) {
+    const { error: insErr } = await sb.from("bookings").insert(inserts);
+    if (insErr) {
+      bookingHint.textContent = `取消后重建区间失败：${insErr.message}`;
+      return;
+    }
+  }
+  await refreshStateFromCloud();
   hideTooltip();
   bookingHint.textContent = `已取消 ${toHH(cancelHour)}-${toHH(cancelHour + 1)} 的占用。`;
   renderTimeline();
 }
 
-machineForm.addEventListener("submit", (e) => {
+machineForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(machineForm);
   const name = String(fd.get("name") || "").trim();
@@ -292,14 +337,24 @@ machineForm.addEventListener("submit", (e) => {
 
   if (!name || !model || !location) return;
 
-  state.machines.push({ id: uid("machine"), name, model, location, remark });
-  saveState();
+  const { error } = await sb.from("machines").insert({
+    id: uid("machine"),
+    name,
+    model,
+    location,
+    remark
+  });
+  if (error) {
+    bookingHint.textContent = `新增机器失败：${error.message}`;
+    return;
+  }
+  await refreshStateFromCloud();
   machineForm.reset();
   renderMachines();
   renderTimeline();
 });
 
-bookingForm.addEventListener("submit", (e) => {
+bookingForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   bookingHint.textContent = "";
 
@@ -333,17 +388,20 @@ bookingForm.addEventListener("submit", (e) => {
     return;
   }
 
-  state.bookings.push({
+  const { error } = await sb.from("bookings").insert({
     id: uid("booking"),
-    machineId,
+    machine_id: machineId,
     date,
-    startHour,
-    endHour,
-    userName: currentUser,
+    start_hour: startHour,
+    end_hour: endHour,
+    user_name: currentUser,
     purpose
   });
-
-  saveState();
+  if (error) {
+    bookingHint.textContent = `提交失败：${error.message}`;
+    return;
+  }
+  await refreshStateFromCloud();
   bookingForm.reset();
   startHourSelect.value = "9";
   endHourSelect.value = "11";
@@ -380,9 +438,18 @@ function boot() {
   viewDate.value = todayISO();
   setMachineModal(false);
   currentUserLabel.textContent = `当前用户：${currentUser || "-"}`;
-  renderMachines();
-  renderTimeline();
   ensureUserReady();
 }
 
-boot();
+(async function start() {
+  boot();
+  if (!initSupabase()) return;
+  try {
+    await refreshStateFromCloud();
+    renderMachines();
+    renderTimeline();
+  } catch (err) {
+    backendStatusLabel.textContent = "后端状态：连接失败";
+    bookingHint.textContent = err.message || "云端数据加载失败";
+  }
+})();

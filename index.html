@@ -12,6 +12,7 @@
     <p>支持机器录入、24小时占用查看、时间段预约。</p>
     <div class="user-toolbar">
       <span id="current-user-label">当前用户：-</span>
+      <span id="backend-status-label">后端状态：未连接</span>
       <button id="switch-user-btn" type="button" class="ghost-btn">切换用户</button>
     </div>
   </header>
@@ -68,7 +69,7 @@
   </main>
 
   <footer class="page-footer">
-    数据保存在浏览器本地（localStorage），适合 GitHub Pages 直接部署。
+    数据由 Supabase 云端存储，可跨浏览器共享。
   </footer>
 
   <div id="machine-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="machine-modal-title">
@@ -115,6 +116,8 @@
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="./config.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
