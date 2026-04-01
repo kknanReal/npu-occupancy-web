@@ -95,6 +95,25 @@ button:hover {
   background: #fff7ed;
 }
 
+.machine-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.machine-delete-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+  background: #b91c1c;
+  color: #fff;
+  border-radius: 8px;
+}
+
+.machine-delete-btn:hover {
+  background: #991b1b;
+}
+
 .toolbar {
   display: flex;
   gap: 10px;
